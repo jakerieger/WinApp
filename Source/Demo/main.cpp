@@ -1,5 +1,8 @@
 #include <WinApp/WinApp.hpp>
 
+#include <chrono>
+#include <thread>
+
 using namespace WinApp;
 
 APP_ENTRY(HINSTANCE, HINSTANCE, PWSTR, int) {
@@ -29,7 +32,10 @@ APP_ENTRY(HINSTANCE, HINSTANCE, PWSTR, int) {
     auto& Progress = App.Add<ProgressBar>(Rect {16, 228, 448, 16});
     Progress.SetValue(40);
 
-    auto& Log  = App.Add<TextBox>(Rect {16, 256, 448, 168}, TextBoxOptions {.Multiline = true, .ReadOnly = true});
+    // Long paths lose their middle rather than their file name.
+    auto& Current = App.Add<Label>(L"No file opened", Rect {16, 252, 448, 20}, TextAlign::Left, TextOverflow::Path);
+
+    auto& Log  = App.Add<TextBox>(Rect {16, 276, 448, 148}, TextBoxOptions {.Multiline = true, .ReadOnly = true});
     auto Print = [&Log](const std::wstring& Line) { Log.AppendText(Line + L"\r\n"); };
 
     Greet.OnClick([&] {
@@ -59,6 +65,7 @@ APP_ENTRY(HINSTANCE, HINSTANCE, PWSTR, int) {
     auto& File   = App.GetMenuBar().AddSubmenu(L"&File");
     auto AddFile = [&](const std::filesystem::path& Path) {
         Print(L"Opened " + Path.wstring());
+        Current.SetText(Path.wstring());
         RecentFiles.push_back(Path.wstring());
     };
 
@@ -95,6 +102,22 @@ APP_ENTRY(HINSTANCE, HINSTANCE, PWSTR, int) {
     auto& View = App.GetMenuBar().AddSubmenu(L"&View");
     View.AddCheckItem(L"Show &Log", {Modifiers::Ctrl, 'L'}, true, [&](bool Show) { Log.SetVisible(Show); });
     View.AddItem(L"&Clear Log", {Modifiers::Ctrl | Modifiers::Shift, VK_DELETE}, [&] { Log.SetText(L""); });
+
+    // Declared after App so it is joined before the App (and the controls it touches) go away.
+    std::jthread Worker;
+
+    auto& Tools = App.GetMenuBar().AddSubmenu(L"&Tools");
+    Tools.AddItem(L"Run &Background Task", {Modifiers::Ctrl, 'B'}, [&] {
+        Print(L"Background task started");
+        // Controls may only be touched on the UI thread, so the worker hands every update to App.Post().
+        Worker = std::jthread([&](const std::stop_token& Stop) {
+            for (int Step = 0; Step <= 100 && !Stop.stop_requested(); Step += 5) {
+                App.Post([&Progress, Step] { Progress.SetValue(Step); });
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            App.Post([Print] { Print(L"Background task finished"); });
+        });
+    });
 
     auto& Help = App.GetMenuBar().AddSubmenu(L"&Help");
     Help.AddItem(L"&About", {Modifiers::None, VK_F1}, [&] {

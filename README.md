@@ -23,3 +23,16 @@ The code below can also be found in the [Demo](Source/Demo/main.cpp) project.
     });
     Name.OnChange([&] { Greet.SetEnabled(!Name.GetText().empty()); });
 ```
+## Background work
+
+Controls may only be touched on the UI thread. Worker threads hand updates back with `App::Post`, which is safe to call
+from any thread:
+
+```c++
+    std::jthread Worker([&](const std::stop_token& Stop) {
+        for (int Step = 0; Step <= 100 && !Stop.stop_requested(); Step += 5) {
+            App.Post([&Progress, Step] { Progress.SetValue(Step); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+```

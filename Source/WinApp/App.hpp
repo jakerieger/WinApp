@@ -9,6 +9,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,6 +27,8 @@ namespace WinApp {
         int MinHeight  = 0;
         bool Resizable = true;
         bool Centered  = true;
+        /// Resource ID of the window's icon (0 = the default application icon).
+        int Icon = 0;
     };
 
     enum class MessageIcon { None, Information, Warning, Error };
@@ -43,6 +46,10 @@ namespace WinApp {
         int Run();
         /// Requests the window to close (goes through the OnClose handler).
         void Close();
+
+        /// Queues Callback to run on the UI thread, where it may touch controls. Safe to call from any thread while the
+        /// App is alive; callbacks still queued when the window is destroyed are dropped.
+        void Post(std::function<void()> Callback);
 
         /// Creates a control as a child of the main window. The App owns it; the returned reference stays valid until
         /// Remove() is called or the App is destroyed.
@@ -103,12 +110,16 @@ namespace WinApp {
         void ShowPopup(Menu& Popup, POINT ScreenPosition);
         bool HandleShortcut(const MSG& Message);
         void ShowContextMenu(HWND Source, POINT ScreenPosition);
+        void SetIcon(int Resource);
+        void RunPosted();
 
         HWND _Handle = nullptr;
         UINT _Dpi    = USER_DEFAULT_SCREEN_DPI;
         Font _Font;
         Size _MinSize;
         bool _ComInitialized = false;
+        HICON _LargeIcon     = nullptr;
+        HICON _SmallIcon     = nullptr;
 
         std::vector<std::unique_ptr<Control>> _Controls;
         std::unordered_map<HWND, Control*> _ControlsByHandle;
@@ -121,6 +132,10 @@ namespace WinApp {
 
         std::function<void(Size)> _ResizeHandler;
         std::function<bool()> _CloseHandler;
+
+        // Callbacks queued by Post(). Guarded by _PostMutex, as is _Handle whenever another thread may read it.
+        std::mutex _PostMutex;
+        std::vector<std::function<void()>> _Posted;
 
         // Exceptions must not unwind through system frames (DispatchMessage), so callbacks that throw are captured
         // here and rethrown from Run().

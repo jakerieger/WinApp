@@ -10,6 +10,9 @@ namespace WinApp {
     namespace {
         constexpr wchar_t kWindowClass[] = L"WinApp.AppWindow";
 
+        // Registered rather than taken from the WM_APP range so it can never collide with the application's own messages.
+        const UINT kPostMessage = RegisterWindowMessageW(L"WinApp.Post");
+
         [[noreturn]] void ThrowLastError(const char* What) {
             throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), What);
         }
@@ -60,6 +63,7 @@ namespace WinApp {
         }
 
         _Font = Font::System(_Dpi);
+        if (Options.Icon) { SetIcon(Options.Icon); }
 
         // Size the window so the *client area* matches the requested size at the monitor's DPI.
         RECT Frame {0, 0, Scale(Options.Width), Scale(Options.Height)};
@@ -92,6 +96,8 @@ namespace WinApp {
         _Controls.clear();
         if (_Handle) { DestroyWindow(_Handle); }
         if (_ComInitialized) { CoUninitialize(); }
+        if (_LargeIcon) { DestroyIcon(_LargeIcon); }
+        if (_SmallIcon) { DestroyIcon(_SmallIcon); }
     }
 
     int App::Run() {
@@ -114,6 +120,33 @@ namespace WinApp {
 
     void App::Close() {
         PostMessageW(_Handle, WM_CLOSE, 0, 0);
+    }
+
+    void App::Post(std::function<void()> Callback) {
+        std::lock_guard Lock(_PostMutex);
+        if (!_Handle) { return; }
+        _Posted.push_back(std::move(Callback));
+        // One message drains the whole queue, so only post when the queue was empty.
+        if (_Posted.size() == 1) { PostMessageW(_Handle, kPostMessage, 0, 0); }
+    }
+
+    void App::RunPosted() {
+        std::vector<std::function<void()>> Callbacks;
+        {
+            std::lock_guard Lock(_PostMutex);
+            Callbacks.swap(_Posted);
+        }
+        for (const auto& Callback : Callbacks) { Callback(); }
+    }
+
+    void App::SetIcon(int Resource) {
+        const HINSTANCE Instance = GetModuleHandleW(nullptr);
+        if (SUCCEEDED(LoadIconMetric(Instance, MAKEINTRESOURCEW(Resource), LIM_LARGE, &_LargeIcon))) {
+            SendMessageW(_Handle, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(_LargeIcon));
+        }
+        if (SUCCEEDED(LoadIconMetric(Instance, MAKEINTRESOURCEW(Resource), LIM_SMALL, &_SmallIcon))) {
+            SendMessageW(_Handle, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(_SmallIcon));
+        }
     }
 
     void App::Register(std::unique_ptr<Control> Owned) {
@@ -310,6 +343,11 @@ namespace WinApp {
     }
 
     LRESULT App::HandleMessage(UINT Message, WPARAM WParam, LPARAM LParam) {
+        if (Message == kPostMessage) {
+            RunPosted();
+            return 0;
+        }
+
         switch (Message) {
             case WM_COMMAND:
                 if (auto* Target = FindControl(reinterpret_cast<HWND>(LParam))) {
@@ -441,7 +479,12 @@ namespace WinApp {
                 for (const auto& Owned : _Controls) { Owned->_Handle = nullptr; }
                 _ControlsByHandle.clear();
                 SetWindowLongPtrW(_Handle, GWLP_USERDATA, 0);
-                const HWND Handle = std::exchange(_Handle, nullptr);
+                HWND Handle = nullptr;
+                {
+                    std::lock_guard Lock(_PostMutex);
+                    Handle = std::exchange(_Handle, nullptr);
+                    _Posted.clear();
+                }
                 return DefWindowProcW(Handle, Message, WParam, LParam);
             }
 
